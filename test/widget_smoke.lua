@@ -149,6 +149,17 @@ gpsValue = { lat = -33.9, lon = 151.2 }
 widget.background(vars)
 check(vars.lastValidGps.lat == -33.9, "background() updates last fix")
 
+-- 8. Steady state: 20 Hz refresh for a minute with nothing changing must not create
+--    LVGL objects (creating one per refresh without clear() is what crashed the
+--    upstream proof-of-concept), and every build must be preceded by a clear().
+if mode == "native" then
+    tick(2) -- absorb the rebuild for the fix restored in step 7
+    local buildsSteady, clearsSteady = #built, built.cleared
+    tick(1200) -- 60 s at 20 Hz
+    check(#built == buildsSteady, "native: no objects created while state is unchanged (" .. (#built - buildsSteady) .. " extra builds)")
+    check(built.cleared == #built, "native: lvgl.clear() before every build (" .. tostring(built.cleared) .. " clears, " .. #built .. " builds)")
+end
+
 ------------------------------------------------------------------------------
 if mode == "native" then
     check(lcdCalls == 0, "native: never draws with lcd.* (no-ops in LVGL layout)")
