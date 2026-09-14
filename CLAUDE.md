@@ -18,9 +18,22 @@ lua src/SCRIPTS/TELEMETRY/qrPos.lua "geo:37.87133,-122.31750"
 lua src/SCRIPTS/TELEMETRY/qrPos.lua "geo:1,2" "comgooglemaps://?q=1,2"
 ```
 
-The CLI run also writes `qr_temp.bmp` into the current working directory (it exercises the BMP writer). Delete it before committing; it is not in `.gitignore`.
+The CLI run also writes `qr_temp.bmp` into the current working directory (it exercises the BMP writer). It is gitignored.
 
-There are no unit tests. Verify engine changes by running the command above and checking the ASCII output scans (or at least that all 11 stages complete with `finished with usage:`). Radio-side rendering (`lcd.*`, `Bitmap.*`) can only be verified on a radio or in the EdgeTX/OpenTX Companion simulator.
+### Tests
+
+`test/qrtest.py` is the end-to-end check for the encoder. It runs the script on many inputs, decodes the printed ASCII frame and the written BMP with an independent QR reader (zbar), and requires the decoded text to equal the input. Run it after any change to `Qr` or the lookup tables; a QR that merely looks plausible is not proof, since ECC bugs produce clean-looking codes that decode to wrong coordinates.
+
+```bash
+apt install lua5.4 zbar-tools && pip install pillow   # one-time setup
+python3 test/qrtest.py                 # fixed suite (~150 cases), non-zero exit on failure
+python3 test/qrtest.py --random 200    # plus random coordinates, deterministic seed
+python3 test/qrtest.py "geo:1,2"       # just these strings
+```
+
+The suite includes a "yields at every check" mode that rewrites the CLI `getUsage()` stub to always report overload, which proves every stage makes progress per call. Keep that guarantee when adding loops (see the invariants below).
+
+Radio-side rendering (`lcd.*`, `Bitmap.*`) can only be verified on a radio or in the EdgeTX/OpenTX Companion simulator.
 
 ## Architecture
 

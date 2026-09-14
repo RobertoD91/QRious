@@ -353,8 +353,9 @@ function Qr:genframe()
                     tmp.id = id
                     if id > tmp.id_start and getUsage() > MAX_LOAD then return end
                     local xor_val = bit32.bxor(self.eccbuf[tmp.y + id], self.eccbuf[tmp.k])
-                    local fb = xor_val < 255 and string.byte(GLOG_LOOKUP, xor_val + 1) or nil
-                    if fb and fb ~= 255 then
+                    -- glog[0] == 255 marks a zero term; every other value (255 included) is a valid log
+                    local fb = string.byte(GLOG_LOOKUP, xor_val + 1)
+                    if fb ~= 255 then
                         for jd = 1, self.eccblkwid - 1 do
                             self.eccbuf[tmp.k + jd - 1] = bit32.bxor(self.eccbuf[tmp.k + jd], string.byte(GEXP_LOOKUP, 1 + self:modnn(fb + self.genpoly[self.eccblkwid - jd])))
                         end
@@ -542,7 +543,8 @@ function Qr:toBMP(filepath, resumeIdx, fgColor, bgColor, bgTransp)
 
     local padding = string.rep("\000", rowPadding)
     for y = resumeIdx, 0, -1 do
-        if getUsage() > MAX_LOAD then io.close(f) return y end
+        -- always write at least one row per call so generation can't stall under sustained load
+        if y < resumeIdx and getUsage() > MAX_LOAD then io.close(f) return y end
         local rowData = ""
         for x = 0, w - 1 do
             local isQr = x > 0 and x < w - 1 and y > 0 and y < w - 1 and self:getFrame((x - 1) + (y - 1) * qrW)
