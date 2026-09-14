@@ -67,6 +67,7 @@ Installs just like any other opentx/edgetx lua script! Just copy three files.
 On color display radios you can modify settings (see the gif!) Some features require EdgeTx 2.11+ ([github](https://github.com/EdgeTX/edgetx/releases))!
 - Dropdown picker for which link-type you'd like. (On old versions you'll just see a simple switch)
 - More options! Older versions are limited to 5. Transparency is the #6 option.
+- **Native QR rendering.** EdgeTx 2.11 exposes the firmware's own QR generator to Lua (`lvgl.qrcode`). When the widget finds it, the QR is encoded and drawn by the firmware in C in a single call: no Lua encoder running across cycles, no BMP written to the SD card, and the encoder's buffers are never allocated. The transparency option has no effect in this mode (the firmware's QR has an opaque background). Older EdgeTx and OpenTx automatically use the Lua encoder described below.
 
 
 ## Key Technical Achievements

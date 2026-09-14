@@ -33,6 +33,15 @@ python3 test/qrtest.py "geo:1,2"       # just these strings
 
 The suite includes a "yields at every check" mode that rewrites the CLI `getUsage()` stub to always report overload, which proves every stage makes progress per call. Keep that guarantee when adding loops (see the invariants below).
 
+`test/widget_smoke.lua` drives the color widget through create/refresh/update/background against a mocked EdgeTX API, once per rendering mode:
+
+```bash
+lua test/widget_smoke.lua native   # EdgeTX 2.11+ (lvgl.qrcode present, useLvgl layout)
+lua test/widget_smoke.lua legacy   # EdgeTX <= 2.10 / OpenTX (Lua encoder + BMP + lcd)
+```
+
+It checks lifecycle errors, which firmware API each mode touches, and the QR payload as fix, time and options change. It does not prove on-radio rendering.
+
 Radio-side rendering (`lcd.*`, `Bitmap.*`) can only be verified on a radio or in the EdgeTX/OpenTX Companion simulator.
 
 ## Architecture
@@ -76,7 +85,14 @@ Stage 11 is output: if `self.bmpPath` is set it streams a 32-bit BGRA BMP (with 
 
 ### Widget specifics
 
-- All widget instances share one `Qr` instance and one BMP file. `qrMutex` records which instance's `vars` currently owns generation; `getMyQr(vars)` returns `nil` for the others so only one instance generates at a time.
+The widget has two rendering paths, chosen once at load time by `NATIVE_QR = lvgl ~= nil and lvgl.qrcode ~= nil`:
+
+- **Native (EdgeTX 2.11+).** The return table sets `useLvgl = true`, which puts the widget in EdgeTX's LVGL layout mode: `refresh()` still runs every cycle but all `lcd.*` calls are silent no-ops, so drawing is done by building LVGL objects. `refreshNative` builds one `qrcode` object (firmware encodes and draws it in C, in one call) plus a status `label` whose `text`/`visible` are functions the firmware polls. `lvgl.qrcode` only takes `data` at build time, so a new payload means `lvgl.clear()` and a rebuild; the `interval` option throttles that. The Lua encoder is never instantiated and the global `Qr` prototype is released in `loadModule()`. `bgTransp` is ignored here because LVGL's QR has no background alpha.
+- **Legacy (EdgeTX <= 2.10, OpenTX).** Everything below. Older loaders ignore the unknown `useLvgl` key, so the same file works on both.
+
+The engine module is still loaded in native mode, for `getGps` and the link tables.
+
+- All legacy widget instances share one `Qr` instance and one BMP file. `qrMutex` records which instance's `vars` currently owns generation; `getMyQr(vars)` returns `nil` for the others so only one instance generates at a time.
 - Widget options are declared in `myoptions`. The link-type `CHOICE` option's label list is filled in at `create()` time from the engine's `linkLabels`. `CHOICE` and more than five options need EdgeTX 2.11+; older firmware shows a plain switch and truncates the option list, which is why option order matters (transparency is deliberately sixth).
 - Link types are defined once, in the telemetry script's parallel `linkLabels` / `linkPrefixes` arrays. Add new map-app URL schemes there. The `prefixes` table in the widget is unused legacy and is not the source of truth.
 - Telemetry page controls: ENTER generates, long-ENTER / MENU toggles auto mode (regenerates every `AUTO_MODE_INTERVAL` seconds when the position changes), +/- cycles link type. `background()` keeps polling GPS while the page is not shown so the last good fix survives a crash that kills the telemetry link.

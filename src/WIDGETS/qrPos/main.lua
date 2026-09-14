@@ -1,4 +1,11 @@
 local TELE_PATH = "/SCRIPTS/TELEMETRY"
+-- EdgeTX 2.11+ exposes the firmware's own QR renderer to Lua as lvgl.qrcode.
+-- When it exists the firmware encodes and draws the QR in C in a single call, so the
+-- Lua encoder and the BMP file on the SD card are not needed at all. On older EdgeTX
+-- and OpenTX (no lvgl API) the widget falls back to the Lua encoder + BMP path below.
+local NATIVE_QR = lvgl ~= nil and lvgl.qrcode ~= nil
+local STATUS_H = 16 --px reserved under the QR for the status line (native mode)
+
 local qr = nil
 local qrMutex = nil --reference to vars of active widget using qr module
 local getGps = nil
@@ -11,26 +18,26 @@ local myoptions = {
     { "qrColor",   COLOR, BLUE },
     { "textColor", COLOR, DARKBLUE },
     { "qrBG",      COLOR, BLACK },
-    { "bgTransp",  VALUE, 50, 0, 100 },
+    { "bgTransp",  VALUE, 50, 0, 100 }, --BMP path only: lvgl.qrcode has no background alpha
 }
 
-local prefixes = {
-    linknone = "",
-    linkgeo = "geo:",
-    linkgoogle = "comgooglemaps://?q=",
-    linkcomaps = "cm://map?ll=",
-    linkguru = "GURU://"
-}
+local function loadModule()
+    if getGps ~= nil then return end
+    local module = loadfile(TELE_PATH .. "/qrPos.lua")(false)
+    getGps = module.getGps
+    myoptions[1][4] = module.linkLabels
+    linkPrefixes = module.linkPrefixes
+    if NATIVE_QR then
+        Qr = nil --release the Lua encoder prototype, the firmware renders the QR
+    else
+        qr = module.qr:new()
+    end
+    module = nil
+    collectgarbage()
+end
 
 local function create(zone, options)
-    if qr == nil then
-        local module = loadfile(TELE_PATH .. "/qrPos.lua")(false)
-        getGps = module.getGps
-        qr = module.qr:new()
-        myoptions[1][4] = module.linkLabels
-        linkPrefixes = module.linkPrefixes
-        collectgarbage()
-    end
+    loadModule()
     return {
         zone = zone,
         options = options,
@@ -38,9 +45,72 @@ local function create(zone, options)
         lastQrStr = nil,
         lastValidGps = nil,
         activeGps = nil,
-        bmpObj, bmpPos = nil, nil
+        bmpObj, bmpPos = nil, nil,
+        ui = nil,        --native: lvgl object refs
+        statusText = nil, --native: text under the QR, nil when hidden
+        dirty = false,   --native: options changed, rebuild
     }
 end
+
+local function background(vars) -- Update GPS in background
+    local gpsData = getGps and getGps() or nil
+    if gpsData and gpsData.valid then
+        vars.lastValidGps = gpsData
+    end
+end
+
+local function qrString(vars)
+    local prefix = linkPrefixes[vars.options.linkType or 1] or 'geo:'
+    local gps = vars.lastValidGps
+    return (gps and gps.valid)
+        and prefix .. string.format("%.6f,%.6f", gps.lat, gps.lon)
+        or prefix .. "no gps"
+end
+
+------------------------------------------------------------------------------
+-- Native path (EdgeTX 2.11+): firmware-rendered QR through lvgl.qrcode
+------------------------------------------------------------------------------
+
+local function buildNative(vars, str)
+    lvgl.clear() --qrcode data is fixed at build time, so rebuild this widget's objects
+    local zone = vars.zone
+    local size = math.min(zone.w, zone.h - STATUS_H)
+    vars.ui = lvgl.build({
+        { type = "qrcode",
+          x = math.floor((zone.w - size) / 2), y = math.floor((zone.h - STATUS_H - size) / 2), w = size,
+          data = str,
+          color = vars.options.qrColor or BLACK,
+          bgColor = vars.options.qrBG or WHITE },
+        { type = "label",
+          x = 0, y = zone.h - STATUS_H, w = zone.w, h = STATUS_H,
+          font = SMLSIZE, align = CENTER,
+          color = vars.options.textColor or BLACK,
+          text = function() return vars.statusText or "" end,
+          visible = function() return vars.statusText ~= nil end },
+    })
+end
+
+local function refreshNative(vars)
+    background(vars) --gets latest gps data
+    local newStr = qrString(vars)
+    local interval = vars.options.interval or 10
+    local activeAge = (vars.activeGps ~= nil) and ((getTime() - vars.activeGps.time) / 100) or interval + 1
+    if vars.ui == nil or vars.dirty or (newStr ~= vars.lastQrStr and activeAge > interval) then
+        buildNative(vars, newStr)
+        vars.lastQrStr, vars.activeGps, vars.dirty = newStr, vars.lastValidGps, false
+    end
+    if vars.lastValidGps == nil or not vars.lastValidGps.valid then
+        vars.statusText = "NO GPS"
+    elseif activeAge > interval + 1 then
+        vars.statusText = string.format("outdated %.0fs", activeAge)
+    else
+        vars.statusText = nil
+    end
+end
+
+------------------------------------------------------------------------------
+-- Legacy path (EdgeTX <= 2.10, OpenTX): Lua encoder streams a BMP, lcd draws it
+------------------------------------------------------------------------------
 
 function getMyQr(vars)
     return (qrMutex == nil or qrMutex == vars) and qr or nil
@@ -78,38 +148,10 @@ local function drawOverlayMsg(zone, text, barProgress, barMax)
         lcd.drawFilledRectangle(barX + 1, barY + 1, (barW - 2) * barProgress / barMax, 4, CUSTOM_COLOR)
     end
 end
-local function update(vars, newOptions)
-    if vars ~= nil then
-        vars.options = newOptions
-        vars.activeGps = nil --force refresh
-        vars.bmpObj = nil --force reload bmp
-    end
-end
 
-local function background(vars) -- Update GPS in background
-    local gpsData = getGps and getGps() or nil
-    if gpsData and gpsData.valid then
-        vars.lastValidGps = gpsData
-    end
-end
-
-local function refresh(vars)
-    if qr == nil or getGps == nil then
-        local newVars = create(vars.zone, vars.options)
-        for k, v in pairs(newVars) do
-            vars[k] = v
-        end
-        print("QR module not initialized")
-        return
-    end
+local function refreshLegacy(vars)
     background(vars) --gets latest gps data
-    -- Determine which prefix to use (from options)
-    local linkidx = vars.options.linkType
-    local prefix = linkPrefixes[linkidx or 1] or 'geo:'
-    -- Build QR string
-    local newStr = (vars.lastValidGps and vars.lastValidGps.valid)
-        and prefix .. string.format("%.6f,%.6f", vars.lastValidGps.lat, vars.lastValidGps.lon)
-        or prefix .. "no gps"
+    local newStr = qrString(vars)
     -- Check if we need to generate a new QR code
     local interval = (vars.options.interval or 10)
     local activeAge = (vars.activeGps ~= nil) and ((getTime() - vars.activeGps.time) / 100) or interval + 1
@@ -148,11 +190,36 @@ local function refresh(vars)
     end
 end
 
+------------------------------------------------------------------------------
+
+local function update(vars, newOptions)
+    if vars ~= nil then
+        vars.options = newOptions
+        vars.activeGps = nil --force refresh
+        vars.bmpObj = nil --force reload bmp
+        vars.dirty = true --native: rebuild with new colors / link type
+    end
+end
+
+local function refresh(vars)
+    if getGps == nil then
+        loadModule()
+        print("QR module not initialized")
+        return
+    end
+    if NATIVE_QR then
+        refreshNative(vars)
+    else
+        refreshLegacy(vars)
+    end
+end
+
 return {
     name = "qrLua",
     options = myoptions,
     create = create,
     update = update,
     refresh = refresh,
-    background = background
+    background = background,
+    useLvgl = NATIVE_QR, --EdgeTX 2.11+: LVGL layout, ignored by older loaders
 }
