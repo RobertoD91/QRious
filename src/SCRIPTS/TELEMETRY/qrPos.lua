@@ -135,8 +135,8 @@ function Qr:genframe()
         self.progress = 1
     end
 
-    if self.progress == 1 then --determine version
-        if self.resume == nil then self.resume = 0 end
+    if self.progress == 1 then --determine version (smallest that fits, 1..MAX_QR_VERSION)
+        if self.resume == nil then self.resume, self.version = 1, 0 end
         for vsn = self.resume, MAX_QR_VERSION do
             if getUsage() > MAX_LOAD and vsn > self.resume then
                 self.resume = vsn
@@ -154,6 +154,11 @@ function Qr:genframe()
             end
         end
         self.resume = nil
+        if self.version == 0 then --input doesn't fit even in MAX_QR_VERSION: fail instead of building garbage
+            print(string.format("QR: data len [%d] exceeds capacity of version %d", #self.inputstr, MAX_QR_VERSION))
+            self.progress = nil
+            return
+        end
         self.width = 17 + 4 * self.version
         print(string.format("QR: finished calculating version [%d] width [%d] from data len [%d]", self.version, self.width, #self.inputstr))
         self.progress = 2
